@@ -81,7 +81,7 @@ int CDnsParse::parsednslocal( char* szHost )
     return nRet;
 }
 
-CHttpLocal::CHttpLocal( SOCKET s, unsigned int nipremote, unsigned int uportremote,unsigned int uportremoteudp, BOOL bHandle /*= TRUE*/ )
+CHttpTun::CHttpTun( SOCKET s, unsigned int nipremote, unsigned int uportremote,unsigned int uportremoteudp, BOOL bHandle /*= TRUE*/ )
 : m_s(s)
 , m_bHandle(bHandle)
 , m_nSendIndex(0)
@@ -90,12 +90,11 @@ CHttpLocal::CHttpLocal( SOCKET s, unsigned int nipremote, unsigned int uportremo
 , m_nipremote(nipremote)
 , m_uportremote(uportremote)
 , m_uportremoteudp(uportremoteudp)
-, m_bIsEncry(FALSE)
 {
 
 }
 
-CHttpLocal::~CHttpLocal()
+CHttpTun::~CHttpTun()
 {
     if (m_bHandle)
     {
@@ -107,12 +106,7 @@ CHttpLocal::~CHttpLocal()
     }
 }
 
-int CHttpLocal::SendString( char* szbuffer )
-{
-    return send(m_s, szbuffer, strlen(szbuffer), 0);
-}
-
-BOOL CHttpLocal::SendData()
+BOOL CHttpTun::SendData()
 {
     BOOL bRet = TRUE;
     if (m_nSendSize)
@@ -120,7 +114,7 @@ BOOL CHttpLocal::SendData()
         int needSend = m_nSendSize - m_nSendIndex;
         if (needSend)
         {
-            int nret = send(m_s, m_szbuffer + m_nSendIndex, needSend, 0);
+            int nret = send(m_s, m_SendCache + m_nSendIndex, needSend, 0);
             if (nret == SOCKET_ERROR)
             {
                 if (WSAEWOULDBLOCK == ::WSAGetLastError())
@@ -141,26 +135,19 @@ BOOL CHttpLocal::SendData()
     return bRet;
 }
 
-void CHttpLocal::SetSendData( char* buffer, int nSize )
+void CHttpTun::SetSendData( char* buffer, int nSize )
 {
     m_nSendIndex = 0;
     m_nSendSize = nSize;
-    memcpy(m_szbuffer, buffer, m_nSendSize);
-    if (m_bIsEncry)
-    {
-        for (DWORD dwIndex = 0; dwIndex < m_nSendSize; ++dwIndex)
-        {
-            m_szbuffer[dwIndex] = (m_szbuffer[dwIndex] ^ 1);
-        }
-    }
+    memcpy(m_SendCache, buffer, m_nSendSize);
 }
 
-BOOL CHttpLocal::IsCanSend()
+BOOL CHttpTun::IsCanSend()
 {
     return m_nSendIndex >= m_nSendSize;
 }
 
-BOOL CHttpLocal::IsNeedSend()
+BOOL CHttpTun::IsNeedSend()
 {
     if (m_nSendSize <= 0)
     {
@@ -170,12 +157,12 @@ BOOL CHttpLocal::IsNeedSend()
     return m_nSendSize > m_nSendIndex;
 }
 
-BOOL CHttpLocal::IsConnect()
+BOOL CHttpTun::IsConnect()
 {
     return m_bIsConnect;
 }
 
-int CHttpLocal::Connect( char* szHost, unsigned short port )
+int CHttpTun::Connect( char* szHost, unsigned short port )
 {
     int nRet = -1;
 
@@ -212,6 +199,11 @@ int CHttpLocal::Connect( char* szHost, unsigned short port )
     }
 Exit0:
     return nRet;
+}
+
+int CHttpTun::RecvData( char* buffer, int nbuffersize )
+{
+    return recv(m_s, buffer, nbuffersize, 0);
 }
 
 CHttpProxyServer::CHttpProxyServer()
@@ -262,7 +254,7 @@ int CHttpProxyServer::Init( unsigned int nip, unsigned short uport, unsigned int
     m_uportremote = uportremote;
     m_uportremoteudp = uportremoteudp;
 
-    if (m_hWorkThread = (HANDLE)_beginthreadex(NULL, 0, CHttpProxyServer::s_WorkerThread, (void*)this, 0, NULL), m_hWorkThread==NULL)
+    if (m_hWorkThread = (HANDLE)_beginthreadex(NULL, 0, CHttpProxyServer::s_AcceptThread, (void*)this, 0, NULL), m_hWorkThread==NULL)
     {
         nret=4;
         goto Exit0;
@@ -353,12 +345,12 @@ int CHttpProxyServer::SetProxy( char* szip, unsigned short port )
     return 0;
 }
 
-unsigned int __stdcall CHttpProxyServer::s_WorkerThread( void* param )
+unsigned int __stdcall CHttpProxyServer::s_AcceptThread( void* param )
 {
     int nret = -1;
     __try
     {
-        nret = ((CHttpProxyServer*)param)->WorkerThread();
+        nret = ((CHttpProxyServer*)param)->AcceptThread();
     }
     __except(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -367,7 +359,7 @@ unsigned int __stdcall CHttpProxyServer::s_WorkerThread( void* param )
     return nret;
 }
 
-unsigned int CHttpProxyServer::WorkerThread()
+unsigned int CHttpProxyServer::AcceptThread()
 {
     int nret = -1;
     BOOL bInitWSA = FALSE;
@@ -458,7 +450,7 @@ Exit0:
     return nret;
 }
 
-unsigned int __stdcall CHttpProxyServer::s_SubThread( void* param )
+unsigned int __stdcall CHttpProxyServer::s_TunThread( void* param )
 {
     int nret = -1;
     __try
@@ -469,7 +461,7 @@ unsigned int __stdcall CHttpProxyServer::s_SubThread( void* param )
             SOCKETCLIENT info = *lpInfo;
             delete lpInfo;
             lpInfo = NULL;
-            nret = ((CHttpProxyServer*)info.lpthis)->s_SubThread(info);
+            nret = ((CHttpProxyServer*)info.lpthis)->TunThread(info);
 
             if (info.sClient != INVALID_SOCKET)
             {
@@ -489,11 +481,11 @@ unsigned int __stdcall CHttpProxyServer::s_SubThread( void* param )
 #define REMOTE_CLOSE (2)
 #define ALL_CLOSE (LOCAL_CLOSE|REMOTE_CLOSE)
 
-unsigned int CHttpProxyServer::s_SubThread( SOCKETCLIENT &clientinfo )
+unsigned int CHttpProxyServer::TunThread( SOCKETCLIENT &clientinfo )
 {
     timeval vtimeout = { 1,0 };
-    CHttpLocal slocal(clientinfo.sClient, clientinfo.nipremote, clientinfo.uportremote, clientinfo.uportremoteudp, FALSE);
-    CHttpLocal sremote(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), clientinfo.nipremote, clientinfo.uportremote, clientinfo.uportremoteudp);
+    CHttpTun slocal(clientinfo.sClient, clientinfo.nipremote, clientinfo.uportremote, clientinfo.uportremoteudp, FALSE);
+    CHttpTun sremote(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), clientinfo.nipremote, clientinfo.uportremote, clientinfo.uportremoteudp);
 
     volatile DWORD dwClsFlag = 0;
     volatile DWORD dwTimeCls = 0;
@@ -540,79 +532,67 @@ unsigned int CHttpProxyServer::s_SubThread( SOCKETCLIENT &clientinfo )
                     if (!sremote.IsConnect() || sremote.IsCanSend())
                     {
                         char szbuffer[4096]={0};
-                        int nret = recv(slocal.m_s, szbuffer, sizeof(szbuffer)-1, 0);
-                        if(nret != SOCKET_ERROR)
+                        int nret = slocal.RecvData(szbuffer, sizeof(szbuffer)-1);
+                        if(nret == SOCKET_ERROR)
                         {
-                            if (nret == 0)
+                            break;
+                        }
+
+                        if (nret == 0)
+                        {
+                            dwClsFlag |= LOCAL_CLOSE;
+                            shutdown(sremote.m_s, SD_SEND);
+                            if (dwClsFlag == ALL_CLOSE)
                             {
-                                dwClsFlag |= LOCAL_CLOSE;
-                                shutdown(sremote.m_s, SD_SEND);
-                                if (dwClsFlag == ALL_CLOSE)
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            if (!sremote.IsConnect())
+                            {
+                                char szhost[1024] = {0};
+                                unsigned int uport = 0;
+                                int nconnect = -1;
+
+                                httpparser::Request request;
+                                httpparser::HttpRequestParser parser;
+
+                                parser.parse(request, szbuffer, szbuffer + nret);
+                                std::string strhost = request.gethost();
+
+                                if (strhost.empty())
+                                {
+                                    Log("first connect error");
+                                    break;
+                                }
+
+                                BOOL bConnectOK = (2 == sscanf_s(strhost.c_str(), "%[^:]:%d", szhost, sizeof(szhost)-1, &uport) && (nconnect = sremote.Connect(szhost, htons(uport)), nconnect == 0));
+                                if(bConnectOK)
+                                {
+                                    if(stricmp(request.method.c_str(), "CONNECT") == 0)
+                                    {
+                                        slocal.SetSendData("HTTP/1.1 200 Connection Established\r\n\r\n", strlen("HTTP/1.1 200 Connection Established\r\n\r\n"));
+                                    }
+                                    else
+                                    {
+                                        sremote.SetSendData(szbuffer, nret);
+                                    }
+                                }
+
+                                CStringA strlog;
+                                strlog.Format("%s %s return:%d", strhost.c_str(), request.method.c_str(), nconnect);
+                                Log((char*)strlog.GetString());
+
+                                if (!bConnectOK)
                                 {
                                     break;
                                 }
                             }
                             else
                             {
-                                if (!sremote.IsConnect())
-                                {
-                                    BOOL bParseInfoOK = FALSE;
-                                    httpparser::Request request;
-                                    httpparser::HttpRequestParser parser;
-                                    httpparser::HttpRequestParser::ParseResult res = parser.parse(request, szbuffer, szbuffer + nret);
-                                    if( res != httpparser::HttpRequestParser::ParsingError )
-                                    {
-                                        bParseInfoOK = TRUE;
-                                    }
-
-                                    if (bParseInfoOK)
-                                    {
-                                        char szhost[1024] = {0};
-                                        unsigned int uport = 0;
-                                        int nconnect = -1;
-                                        std::string strhost = request.gethost();
-
-                                        if(2 == sscanf_s(strhost.c_str(), "%[^:]:%d", szhost, sizeof(szhost)-1, &uport) && 
-                                            (nconnect = sremote.Connect(szhost, htons(uport)), nconnect == 0))
-                                        {
-                                            if(stricmp(request.method.c_str(), "CONNECT") == 0)
-                                            {
-                                                slocal.SetSendData("HTTP/1.1 200 Connection Established\r\n\r\n", strlen("HTTP/1.1 200 Connection Established\r\n\r\n"));
-                                            }
-                                            else
-                                            {
-                                                sremote.SetSendData(szbuffer, nret);
-                                            }
-                                        }
-                                        else
-                                        {
-                                            CStringA strlog;
-                                            strlog.Format("%s %s error:%d", strhost.c_str(), request.method.c_str(), nconnect);
-
-                                            Log((char*)strlog.GetString());
-                                            break;
-                                        }
-
-                                        CStringA strlog;
-                                        strlog.Format("%s %s error:%d", strhost.c_str(), request.method.c_str(), nconnect);
-
-                                        Log((char*)strlog.GetString());
-                                    }
-                                    else
-                                    {
-                                        Log("first connect error");
-                                        break;
-                                    }
-                                }
-                                else
-                                {
-                                    sremote.SetSendData(szbuffer, nret);
-                                }
+                                sremote.SetSendData(szbuffer, nret);
                             }
-                        }
-                        else
-                        {
-                            break;
                         }
                     }
                 }
@@ -630,27 +610,25 @@ unsigned int CHttpProxyServer::s_SubThread( SOCKETCLIENT &clientinfo )
                     if (slocal.IsCanSend())
                     {
                         char szbuffer[4096] = {0};
-                        int nret = recv(sremote.m_s, szbuffer, sizeof(szbuffer)-1, 0);
+                        int nret = sremote.RecvData(szbuffer,  sizeof(szbuffer)-1);
 
-                        if(nret != SOCKET_ERROR)
+                        if(nret == SOCKET_ERROR)
                         {
-                            if (nret == 0)
+                            break;
+                        }
+
+                        if (nret == 0)
+                        {
+                            dwClsFlag |= REMOTE_CLOSE;
+                            shutdown(slocal.m_s, SD_SEND);
+                            if (dwClsFlag == ALL_CLOSE)
                             {
-                                dwClsFlag |= REMOTE_CLOSE;
-                                shutdown(slocal.m_s, SD_SEND);
-                                if (dwClsFlag == ALL_CLOSE)
-                                {
-                                    break;
-                                }
-                            }
-                            else
-                            {
-                                slocal.SetSendData(szbuffer, nret);
+                                break;
                             }
                         }
                         else
                         {
-                            break;
+                            slocal.SetSendData(szbuffer, nret);
                         }
                     }
                 }
@@ -705,7 +683,7 @@ BOOL CHttpProxyServer::accept_client( SOCKET s, SOCKADDR_IN* addr )
         info->uportremoteudp = m_uportremoteudp;
         info->lpthis = this;
 
-        HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, CHttpProxyServer::s_SubThread, (void*)info, 0, NULL);
+        HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, CHttpProxyServer::s_TunThread, (void*)info, 0, NULL);
         if(hThread)
         {
             bRet = TRUE;
