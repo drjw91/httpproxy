@@ -120,12 +120,12 @@ BOOL CHttpLocal::SendData()
         int needSend = m_nSendSize - m_nSendIndex;
         if (needSend)
         {
-            int nret = send(m_s, m_szbuffer, needSend, 0);
+            int nret = send(m_s, m_szbuffer + m_nSendIndex, needSend, 0);
             if (nret == SOCKET_ERROR)
             {
                 if (WSAEWOULDBLOCK == ::WSAGetLastError())
                 {
-                    m_nSendIndex = m_nSendSize;
+                    m_nSendIndex += needSend;
                 }
                 else
                 {
@@ -134,7 +134,7 @@ BOOL CHttpLocal::SendData()
             }
             else
             {
-                m_nSendIndex = nret;
+                m_nSendIndex += nret;
             }
         }
     }
@@ -554,47 +554,55 @@ unsigned int CHttpProxyServer::s_SubThread( SOCKETCLIENT &clientinfo )
                             }
                             else
                             {
-                                BOOL bParseInfoOK = FALSE;
-                                httpparser::Request request;
-                                httpparser::HttpRequestParser parser;
-                                httpparser::HttpRequestParser::ParseResult res = parser.parse(request, szbuffer, szbuffer + nret);
-                                if( res != httpparser::HttpRequestParser::ParsingError )
+                                if (!sremote.IsConnect())
                                 {
-                                    bParseInfoOK = TRUE;
-                                }
-
-                                if (bParseInfoOK)
-                                {
-                                    char szhost[1024] = {0};
-                                    unsigned int uport = 0;
-                                    int nconnect = -1;
-                                    std::string strhost = request.gethost();
-
-                                    if(2 == sscanf_s(strhost.c_str(), "%[^:]:%d", szhost, sizeof(szhost)-1, &uport) && 
-                                       (nconnect = sremote.Connect(szhost, htons(uport)), nconnect == 0))
+                                    BOOL bParseInfoOK = FALSE;
+                                    httpparser::Request request;
+                                    httpparser::HttpRequestParser parser;
+                                    httpparser::HttpRequestParser::ParseResult res = parser.parse(request, szbuffer, szbuffer + nret);
+                                    if( res != httpparser::HttpRequestParser::ParsingError )
                                     {
-                                        if(stricmp(request.method.c_str(), "CONNECT") == 0)
+                                        bParseInfoOK = TRUE;
+                                    }
+
+                                    if (bParseInfoOK)
+                                    {
+                                        char szhost[1024] = {0};
+                                        unsigned int uport = 0;
+                                        int nconnect = -1;
+                                        std::string strhost = request.gethost();
+
+                                        if(2 == sscanf_s(strhost.c_str(), "%[^:]:%d", szhost, sizeof(szhost)-1, &uport) && 
+                                            (nconnect = sremote.Connect(szhost, htons(uport)), nconnect == 0))
                                         {
-                                            slocal.SetSendData("HTTP/1.1 200 Connection Established\r\n\r\n", strlen("HTTP/1.1 200 Connection Established\r\n\r\n"));
+                                            if(stricmp(request.method.c_str(), "CONNECT") == 0)
+                                            {
+                                                slocal.SetSendData("HTTP/1.1 200 Connection Established\r\n\r\n", strlen("HTTP/1.1 200 Connection Established\r\n\r\n"));
+                                            }
+                                            else
+                                            {
+                                                sremote.SetSendData(szbuffer, nret);
+                                            }
                                         }
                                         else
                                         {
-                                            sremote.SetSendData(szbuffer, nret);
+                                            CStringA strlog;
+                                            strlog.Format("%s %s error:%d", strhost.c_str(), request.method.c_str(), nconnect);
+
+                                            Log((char*)strlog.GetString());
+                                            break;
                                         }
-                                    }
-                                    else
-                                    {
+
                                         CStringA strlog;
                                         strlog.Format("%s %s error:%d", strhost.c_str(), request.method.c_str(), nconnect);
 
                                         Log((char*)strlog.GetString());
+                                    }
+                                    else
+                                    {
+                                        Log("first connect error");
                                         break;
                                     }
-
-                                    CStringA strlog;
-                                    strlog.Format("%s %s error:%d", strhost.c_str(), request.method.c_str(), nconnect);
-
-                                    Log((char*)strlog.GetString());
                                 }
                                 else
                                 {
